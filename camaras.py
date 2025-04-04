@@ -1,53 +1,77 @@
-import cv2
 import numpy as np
-import ctypes
-from pixy2 import Pixy2CCC
+import cv2
+import torch
+import depthai as dai
+from segment_anything import sam_model_registry, SamPredictor
+import matplotlib.pyplot as plt
 
-# Inicializar Pixy2 en Windows
-pixy2 = Pixy2CCC()
-pixy2.init()
-pixy2.change_prog("video")
+print("Algoritmo de conteo de píxeles con OAK-1")
+print("CUDA is available:", torch.cuda.is_available())
 
-# Definir buffer para almacenar la imagen de Pixy2 en Windows
-frame_buffer = (ctypes.c_uint8 * (320 * 200))()
-frame_pointer = ctypes.cast(frame_buffer, ctypes.POINTER(ctypes.c_uint8))  # Necesario en Windows
+def show_points(coords, labels, ax, marker_size=375):
+    pos_points = coords[labels==1]
+    neg_points = coords[labels==0]
+    ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
+    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1)
 
-# Función para capturar frames desde Pixy2
-def get_frame():
-    result = pixy2.video_get_frame(0, 0, 320, 200, frame_pointer)
-    if result == 0:  # Si la captura fue exitosa
-        return np.ctypeslib.as_array(frame_pointer, shape=(200, 320))  # Convertir a array numpy
-    return None
+# Inicializar el modelo SAM
+sam_checkpoint = "src/models/sam_vit_l.pth"
+model_type = "vit_l"
+device = "cuda" if torch.cuda.is_available() else "cpu"
+sam = sam_model_registry[model_type](checkpoint=sam_checkpoint).to(device)
+predictor = SamPredictor(sam)
 
-while True:
-    # Capturar imagen desde Pixy2
-    frame = get_frame()
-    if frame is None:
-        continue  # Si no hay imagen, sigue intentando
+# Función para segmentar una imagen capturada
+def segment(image):
+    image_height, image_width = image.shape[:2]
 
-    # Convertir a escala de grises y aplicar ecualización del histograma
-    gray_hand = cv2.equalizeHist(frame)
+    # Configurar la imagen en el predictor
+    predictor.set_image(image)
 
-    # Aplicar desenfoque gaussiano para reducir ruido
-    blurred = cv2.GaussianBlur(gray_hand, (5, 5), 0)
+    # Definir punto de referencia para segmentación (centro de la imagen)
+    input_point = np.array([[image_width / 2, image_height / 2]])
+    input_label = np.array([1])
 
-    # Aplicar umbral para detectar áreas fluorescentes
-    _, fluorescence = cv2.threshold(blurred, 155, 255, cv2.THRESH_BINARY)
+    # Obtener máscaras del modelo
+    masks, _, _ = predictor.predict(
+        point_coords=input_point,
+        point_labels=input_label,
+        multimask_output=True,
+    )
 
-    # Encontrar contornos de la fluorescencia
-    contours, _ = cv2.findContours(fluorescence, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    # Aplicar máscara a la imagen
+    segmented_image = image.copy()
+    segmented_image[masks[0] == False] = [255, 255, 255]
 
-    # Convertir a BGR para visualizar los contornos en color
-    imagen_color = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
-    cv2.drawContours(imagen_color, contours, -1, (0, 255, 0), 2)
+    return segmented_image
 
-    # Mostrar resultados
-    cv2.imshow('Silueta de la Mano', gray_hand)
-    cv2.imshow('Detección de Fluorescencia', fluorescence)
-    cv2.imshow('Contornos de Fluorescencia', imagen_color)
+# Crear pipeline de DepthAI para capturar imágenes desde OAK-1
+pipeline = dai.Pipeline()
+cam_rgb = pipeline.create(dai.node.ColorCamera)
+cam_rgb.setPreviewSize(1920, 1080)  # Ajustar resolución
+cam_rgb.setBoardSocket(dai.CameraBoardSocket.RGB)
+xout_video = pipeline.create(dai.node.XLinkOut)
+xout_video.setStreamName("video")
+cam_rgb.preview.link(xout_video.input)
 
-    # Salir con 'q'
-    if cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+# Iniciar cámara OAK-1 y procesar imágenes en tiempo real
+with dai.Device(pipeline) as device:
+    video_queue = device.getOutputQueue(name="video", maxSize=1, blocking=False)
 
+    while True:
+        frame_data = video_queue.get()
+        frame = frame_data.getCvFrame()  # Convertir a imagen de OpenCV
+
+        # Aplicar segmentación
+        segmented_image = segment(frame)
+
+        # Mostrar imágenes
+        cv2.imshow("OAK-1 Live Feed", frame)
+        cv2.imshow("Segmented Image", segmented_image)
+
+        # Presiona 'q' para salir
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+# Liberar recursos
 cv2.destroyAllWindows()
