@@ -7,7 +7,7 @@ from segment_anything import sam_model_registry, SamPredictor
 import matplotlib.pyplot as plt
 
 print("Algoritmo de video a imágenes")
-print("CUDA is available:", torch.cuda.is_available())
+# print("CUDA is available:", torch.cuda.is_available())
 
 # def show_points(coords, labels, ax, marker_size=375):
 #     pos_points = coords[labels==1]
